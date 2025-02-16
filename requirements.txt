@@ -1,0 +1,20 @@
+# OpenCV for computer vision operations
+opencv-python>=4.8.0
+
+# Numpy for numerical operations
+numpy>=1.24.0
+
+# Ultralytics for YOLO-based object detection
+ultralytics>=8.0.0
+
+# PyTorch for deep learning (ensure you install the correct version for M1/M2 if needed)
+torch>=2.0.0
+
+# EasyOCR for optical character recognition
+easyocr>=1.7.0
+
+# Certifi for SSL certificate management
+certifi>=2023.7.22
+
+# Watchdog for watching directory
+watchdog>=2.1.0

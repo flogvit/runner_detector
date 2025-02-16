@@ -1,0 +1,8 @@
+.venv
+in/*.jpg
+in/*.jpeg
+out/*.jpeg
+out/*.jpg
+yolov8n.pt
+.DS_Store
+.idea
