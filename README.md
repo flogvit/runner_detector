@@ -29,13 +29,16 @@ This script uses a YOLO model for person detection and EasyOCR for bib number re
     ```
 3. Install the required packages:
     ```bash
-   pip install opencv-python torch ultralytics easyocr
+   pip install -r requirements.txt
     ```
    Note: For PyTorch, please follow the official installation guide to select the correct command for your system and CUDA version.
 
 ## Usage
 Place your input images in a directory (default is in). Then run the script using:
 ```bash
+# Standard values, in, out, 960, 9:16
+python runner_detector.py
+
 python runner_detector.py --input_dir in --output_dir out --min_height 960 --aspect_ratio 9:16
 ```
 
