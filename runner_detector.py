@@ -117,7 +117,7 @@ class RunnerDetector:
             found_numbers = []
             for (_, text, prob) in results:
                 num = re.sub(r'[^0-9]', '', text)
-                if len(num) in [3, 4, 5] and prob > CONFIDENCE_THRESHOLD:
+                if len(num) in [2, 3, 4, 5] and prob > CONFIDENCE_THRESHOLD:
                     found_numbers.append((num, prob))
 
             found_numbers.sort(key=lambda x: x[1], reverse=True)
