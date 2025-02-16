@@ -72,7 +72,7 @@ class RunnerDetector:
 
     def detect_all_bib_numbers(self, image, person_bbox, horizontal_padding=0.3):
         """
-        Detects *all* possible bib numbers (3-4 digits) in the ROI.
+        Detects *all* possible bib numbers (3-5 digits) in the ROI.
         Returns a list of (bib_string, confidence) sorted by confidence descending.
         """
         try:
@@ -113,11 +113,11 @@ class RunnerDetector:
                 contrast_ths=0.2
             )
 
-            # Gather all numbers (3-4 digits) above confidence threshold
+            # Gather all numbers (3-5 digits) above confidence threshold
             found_numbers = []
             for (_, text, prob) in results:
                 num = re.sub(r'[^0-9]', '', text)
-                if len(num) in [3, 4] and prob > CONFIDENCE_THRESHOLD:
+                if len(num) in [3, 4, 5] and prob > CONFIDENCE_THRESHOLD:
                     found_numbers.append((num, prob))
 
             found_numbers.sort(key=lambda x: x[1], reverse=True)
@@ -131,7 +131,7 @@ class RunnerDetector:
 
     def get_crop(self, x1, y1, x2, y2, img_width, img_height):
         """
-        Calculates a 9:16 crop area centered on a detection box, ensuring minimum size.
+        Calculates a ratio crop area centered on a detection box, ensuring minimum size.
         """
         try:
             det_height = y2 - y1
