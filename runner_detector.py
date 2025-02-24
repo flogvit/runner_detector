@@ -23,22 +23,28 @@ CONFIDENCE_THRESHOLD = 0.4  # Confidence threshold for OCR (numbers below this a
 def timer(func):
     """Decorator to measure execution time of functions"""
     def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        elapsed = end_time - start_time
-        print(f"⏱️ {func.__name__} took {elapsed:.2f} seconds")
-        return result
+        # Check if the first argument is self and if timing is enabled
+        if args and hasattr(args[0], 'timing_enabled') and args[0].timing_enabled:
+            start_time = time.time()
+            result = func(*args, **kwargs)
+            end_time = time.time()
+            elapsed = end_time - start_time
+            print(f"⏱️ {func.__name__} took {elapsed:.2f} seconds")
+            return result
+        else:
+            # Just call the function without timing
+            return func(*args, **kwargs)
     return wrapper
 
 
 class RunnerDetector:
-    def __init__(self, min_height=960, ratio_width=9, ratio_height=16):
+    def __init__(self, min_height=960, ratio_width=9, ratio_height=16, timing_enabled=False):
         self.MIN_HEIGHT = min_height
         self.ratio_width = ratio_width
         self.ratio_height = ratio_height
         self.ASPECT_RATIO = ratio_width / ratio_height
         self.MIN_WIDTH = int(min_height * self.ASPECT_RATIO)
+        self.timing_enabled = timing_enabled
 
         print("Initializing models...")
         try:
@@ -92,7 +98,7 @@ class RunnerDetector:
     def enhance_image_for_ocr(self, img):
         """
         Enhanced version with more preprocessing techniques for better OCR results.
-        With additional scaling for speed optimization.
+        Optimized for speed with prioritized techniques and early returns.
         """
         try:
             # Create a copy to avoid modifying the original
@@ -109,45 +115,49 @@ class RunnerDetector:
 
             enhanced_versions = []
 
-            # Convert to grayscale
+            # Convert to grayscale - this is used by most enhancements
             gray = cv2.cvtColor(img_copy, cv2.COLOR_BGR2GRAY)
+            
+            # Prioritize the most effective enhancements (based on success rates)
+            # Add grayscale first - often most effective
             enhanced_versions.append(gray)
-
-            # Apply adaptive thresholding
+            
+            # Apply adaptive thresholding - very effective for bib numbers
             thresh = cv2.adaptiveThreshold(
                 gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY, 11, 2
             )
             enhanced_versions.append(thresh)
-
-            # Apply Otsu's thresholding
+            
+            # Apply Otsu's thresholding - good for high contrast bibs
             _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             enhanced_versions.append(otsu)
 
-            # Apply morphological operations to clean noise
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-            morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-            enhanced_versions.append(morph)
-
-            # Apply sharpening
+            # Limit to 3 enhancements for smaller ROIs to improve speed
+            if max(h, w) <= MAX_ENHANCE_DIM / 2:
+                return enhanced_versions
+                
+            # Add more enhancements for larger ROIs since they likely contain more detail
+            
+            # Apply sharpening - helps with blurry images
             blur = cv2.GaussianBlur(gray, (0, 0), 3)
             sharp = cv2.addWeighted(gray, 1.5, blur, -0.5, 0)
             enhanced_versions.append(sharp)
 
-            # Apply contrast enhancement
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced_contrast = clahe.apply(gray)
-            enhanced_versions.append(enhanced_contrast)
-
-            # Edge enhancement
-            edges = cv2.Canny(gray, 100, 200)
-            dilated_edges = cv2.dilate(edges, kernel, iterations=1)
-            enhanced_versions.append(dilated_edges)
-
-            # Color channel separation for colored bibs (only for smaller images to save time)
-            if len(img_copy.shape) == 3 and max(h, w) <= MAX_ENHANCE_DIM * 1.5:
-                b, g, r = cv2.split(img_copy)
-                enhanced_versions.extend([b, g, r])
+            # Only use these more intensive techniques for medium-sized images
+            if max(h, w) <= MAX_ENHANCE_DIM:
+                # Apply morphological operations to clean noise
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+                morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+                enhanced_versions.append(morph)
+            
+                # Apply contrast enhancement
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced_contrast = clahe.apply(gray)
+                enhanced_versions.append(enhanced_contrast)
+            
+            # Skip color channel separation and edge detection - these are less effective for bib detection
+            # and significantly increase processing time
 
             return enhanced_versions
 
@@ -156,16 +166,17 @@ class RunnerDetector:
             return [img]  # Return original if enhancement fails
 
     def detect_bib_regions(self, img, person_bbox):
-        """Focus on upper torso area where bibs are typically worn"""
+        """Focus on upper torso area where bibs are typically worn - optimized for speed"""
         x1, y1, x2, y2 = map(int, person_bbox)
         height, width = img.shape[:2]
 
         # Upper torso region (25-45% of body height from top)
+        # This is the most likely area for bibs
         torso_y1 = int(y1 + (y2 - y1) * 0.25)
         torso_y2 = int(y1 + (y2 - y1) * 0.45)
 
-        # Add some padding on sides
-        padding = int((x2 - x1) * 0.1)
+        # More selective padding for narrower region
+        padding = int((x2 - x1) * 0.15)  # Slightly increased for better coverage
         torso_x1 = max(0, x1 - padding)
         torso_x2 = min(width, x2 + padding)
 
@@ -209,10 +220,9 @@ class RunnerDetector:
         """
         try:
             all_results = []
-            padding_values = [0.2, 0.3, 0.4]  # Try different padding values
-
+            # Only use one padding value to save processing time
             # Define max dimension for scaling - smaller value will process faster
-            MAX_DIM = 600  # Reduced from 800
+            MAX_DIM = 500  # Further reduced for faster processing
 
             # Special enhancement for yellow bibs (common in race bibs)
             yellow_lower = np.array([20, 100, 100])
@@ -285,72 +295,117 @@ class RunnerDetector:
                     # Enhance image for better OCR
                     enhanced_versions = self.enhance_image_for_ocr(bib_roi)
 
-                    # Try OCR on original and enhanced versions
-                    ocr_start = time.time()
-                    for img_version in [bib_roi] + enhanced_versions:
-                        results = self.reader.readtext(
-                            img_version,
-                            allowlist='0123456789',
-                            paragraph=False,
-                            batch_size=1,
-                            width_ths=0.5,
-                            height_ths=0.5
-                        )
-                        
-                        for (_, text, prob) in results:
-                            num = re.sub(r'[^0-9]', '', text)
-                            if num and prob > CONFIDENCE_THRESHOLD:
-                                all_results.append((num, prob))
+                    # Try OCR on original and enhanced versions with early stopping
+                    ocr_start = time.time() if self.timing_enabled else 0
+                    HIGH_CONFIDENCE_THRESHOLD = 0.85  # Early stopping threshold
+                    
+                    # First check original image - often sufficient
+                    results = self.reader.readtext(
+                        bib_roi,
+                        allowlist='0123456789',
+                        paragraph=False,
+                        batch_size=1,
+                        width_ths=0.5,
+                        height_ths=0.5
+                    )
+                    
+                    found_high_confidence = False
+                    for (_, text, prob) in results:
+                        num = re.sub(r'[^0-9]', '', text)
+                        if num and len(num) >= 3 and len(num) <= 5:  # Valid bib length
+                            all_results.append((num, prob))
+                            if prob > HIGH_CONFIDENCE_THRESHOLD:
+                                found_high_confidence = True
+                    
+                    # Only try enhanced versions if needed
+                    if not found_high_confidence:
+                        for img_version in enhanced_versions:
+                            results = self.reader.readtext(
+                                img_version,
+                                allowlist='0123456789',
+                                paragraph=False,
+                                batch_size=1,
+                                width_ths=0.5,
+                                height_ths=0.5
+                            )
+                            
+                            for (_, text, prob) in results:
+                                num = re.sub(r'[^0-9]', '', text)
+                                if num and prob > CONFIDENCE_THRESHOLD:
+                                    all_results.append((num, prob))
+                                    if prob > HIGH_CONFIDENCE_THRESHOLD:
+                                        found_high_confidence = True
+                                        break
+                            
+                            if found_high_confidence:
+                                break  # Stop processing more versions if high confidence result found
                                 
-                    ocr_time = time.time() - ocr_start
-                    print(f"⏱️ OCR for bib region took {ocr_time:.2f} seconds")
+                    if self.timing_enabled:
+                        ocr_time = time.time() - ocr_start
+                        print(f"⏱️ OCR for bib region took {ocr_time:.2f} seconds")
 
-            # Fall back to scanning torso region with different paddings
+            # Fall back to scanning torso region - but only if needed and only with one padding
             if not all_results:
-                for padding in padding_values:
-                    # Define body regions to check
-                    regions = [
-                        # Upper body (more focused, likely bib location)
-                        {
-                            'y1': y1,
-                            'y2': int(y1 + (y2 - y1) * 0.6),
-                            'x1': int(x1 - (x2 - x1) * padding),
-                            'x2': int(x2 + (x2 - x1) * padding)
-                        },
-                        # Full torso
-                        {
-                            'y1': y1,
-                            'y2': int(y1 + (y2 - y1) * 0.95),
-                            'x1': int(x1 - (x2 - x1) * padding),
-                            'x2': int(x2 + (x2 - x1) * padding)
-                        }
-                    ]
+                # Use only one padding value to save time
+                padding = 0.3  # Middle value is typically most effective
+                
+                # Define only the most promising region (upper body) for efficiency
+                region = {
+                    'y1': y1,
+                    'y2': int(y1 + (y2 - y1) * 0.6),  # Upper body focus
+                    'x1': int(x1 - (x2 - x1) * padding),
+                    'x2': int(x2 + (x2 - x1) * padding)
+                }
+                
+                # Clamp values to image bounds
+                r_y1 = max(0, region['y1'])
+                r_y2 = min(height, region['y2'])
+                r_x1 = max(0, region['x1'])
+                r_x2 = min(width, region['x2'])
 
-                    for region in regions:
-                        # Clamp values to image bounds
-                        r_y1 = max(0, region['y1'])
-                        r_y2 = min(height, region['y2'])
-                        r_x1 = max(0, region['x1'])
-                        r_x2 = min(width, region['x2'])
+                # Skip invalid regions
+                if r_y2 > r_y1 and r_x2 > r_x1:
+                    roi = image[r_y1:r_y2, r_x1:r_x2]
 
-                        # Skip invalid regions
-                        if r_y2 <= r_y1 or r_x2 <= r_x1:
-                            continue
+                    # Always downscale ROI for performance
+                    roi_h, roi_w = roi.shape[:2]
+                    if max(roi_h, roi_w) > MAX_DIM:
+                        scale = MAX_DIM / max(roi_h, roi_w)
+                        roi = cv2.resize(roi, (int(roi_w * scale), int(roi_h * scale)))
 
-                        roi = image[r_y1:r_y2, r_x1:r_x2]
+                    # Get enhanced versions - but limit to essential ones
+                    enhanced_versions = self.enhance_image_for_ocr(roi)
 
-                        # Always downscale ROI for performance
-                        roi_h, roi_w = roi.shape[:2]
-                        if max(roi_h, roi_w) > MAX_DIM:
-                            scale = MAX_DIM / max(roi_h, roi_w)
-                            roi = cv2.resize(roi, (int(roi_w * scale), int(roi_h * scale)))
+                    # Try OCR with early stopping when high confidence result found
+                    ocr_start = time.time() if self.timing_enabled else 0
+                    HIGH_CONFIDENCE_THRESHOLD = 0.85
+                    found_high_confidence = False
+                    
+                    # Try original first
+                    results = self.reader.readtext(
+                        roi,
+                        allowlist='0123456789',
+                        paragraph=False,
+                        batch_size=1,
+                        width_ths=0.5,
+                        height_ths=0.5,
+                        mag_ratio=1.0,
+                        contrast_ths=0.2
+                    )
 
-                        # Get enhanced versions
-                        enhanced_versions = self.enhance_image_for_ocr(roi)
-
-                        # Try OCR on original and enhanced versions
-                        ocr_start = time.time()
-                        for img_version in [roi] + enhanced_versions:
+                    for (_, text, prob) in results:
+                        num = re.sub(r'[^0-9]', '', text)
+                        if num and len(num) >= 3 and len(num) <= 5:  # Valid bib length
+                            all_results.append((num, prob))
+                            if prob > HIGH_CONFIDENCE_THRESHOLD:
+                                found_high_confidence = True
+                    
+                    # Only process enhanced versions if needed
+                    if not found_high_confidence:
+                        for img_version in enhanced_versions:
+                            if found_high_confidence:
+                                break
+                                
                             results = self.reader.readtext(
                                 img_version,
                                 allowlist='0123456789',
@@ -366,6 +421,11 @@ class RunnerDetector:
                                 num = re.sub(r'[^0-9]', '', text)
                                 if num and prob > CONFIDENCE_THRESHOLD:
                                     all_results.append((num, prob))
+                                    if prob > HIGH_CONFIDENCE_THRESHOLD:
+                                        found_high_confidence = True
+                                        break
+                                        
+                    if self.timing_enabled:
                         ocr_time = time.time() - ocr_start
                         print(f"⏱️ Fallback OCR for region took {ocr_time:.2f} seconds")
 
@@ -384,9 +444,38 @@ class RunnerDetector:
     def get_crop(self, x1, y1, x2, y2, img_width, img_height):
         """
         Calculates a ratio crop area centered on a detection box, ensuring minimum size.
+        Avoids partial crops by checking if the person is too close to the edge.
         """
         try:
+            # Calculate detection box dimensions
+            det_width = x2 - x1
             det_height = y2 - y1
+            
+            # Skip if the detection is at the edge of the image (likely a partial person)
+            # Check if the detection box is very close to any edge
+            edge_margin = 0.05  # 5% of image dimension
+            img_edge_margin_x = img_width * edge_margin
+            img_edge_margin_y = img_height * edge_margin
+            
+            # Skip if the person is cut off at the edge (detection box touches image edge)
+            is_at_left_edge = x1 < img_edge_margin_x
+            is_at_right_edge = x2 > (img_width - img_edge_margin_x)
+            is_at_top_edge = y1 < img_edge_margin_y
+            is_at_bottom_edge = y2 > (img_height - img_edge_margin_y)
+            
+            # If the detection is too close to edges, it might be a partial person
+            # Only process detections that are not at image edges
+            if is_at_left_edge or is_at_right_edge or is_at_top_edge or is_at_bottom_edge:
+                person_width_ratio = det_width / img_width
+                person_height_ratio = det_height / img_height
+                
+                # If the person takes up a significant portion of the image, we'll keep it
+                # Otherwise, it's likely a partial person at the edge
+                if (person_width_ratio < 0.4 and person_height_ratio < 0.6):
+                    print(f"Skipping likely partial person at edge: ({x1}, {y1}, {x2}, {y2})")
+                    return None
+            
+            # Normal cropping procedure
             base_padding = det_height * 0.05
             crop_y1 = max(0, int(y1 - base_padding))
             crop_y2 = min(img_height, int(y2 + base_padding))
@@ -398,6 +487,7 @@ class RunnerDetector:
             crop_x1 = max(0, int(center_x - crop_width / 2))
             crop_x2 = min(img_width, int(center_x + crop_width / 2))
 
+            # Ensure minimum size if needed
             if crop_height < self.MIN_HEIGHT:
                 scale = self.MIN_HEIGHT / crop_height
                 new_height = self.MIN_HEIGHT
@@ -429,14 +519,32 @@ class RunnerDetector:
                 print(f"No bibs found for person {idx + 1}. Skipping.")
                 return None
 
-            # Create crop
+            # Create crop (skipping partial people at image edges)
             crop_coords = self.get_crop(x1, y1, x2, y2, img.shape[1], img.shape[0])
             if not crop_coords:
-                print("Failed to get crop coordinates.")
+                print(f"Skipping person {idx + 1} - likely partial or at edge")
                 return None
 
             # Extract the crop
             crop_x1, crop_y1, crop_x2, crop_y2 = crop_coords
+            
+            # Additional check: if the crop is touching the image edges on 
+            # multiple sides, it's likely a partial person
+            edge_touches = 0
+            if crop_x1 == 0:
+                edge_touches += 1
+            if crop_y1 == 0:
+                edge_touches += 1
+            if crop_x2 == img.shape[1]:
+                edge_touches += 1
+            if crop_y2 == img.shape[0]:
+                edge_touches += 1
+                
+            # If touching more than one edge, likely a partial crop
+            if edge_touches > 1:
+                print(f"Skipping person {idx + 1} - crop touches {edge_touches} image edges")
+                return None
+                
             cropped = img[crop_y1:crop_y2, crop_x1:crop_x2]
 
             # Prepare filename with all detected bibs
@@ -504,8 +612,10 @@ class RunnerDetector:
             # Use adjusted batch size
             batch_paths = batch_paths[:adjusted_batch_size]
 
-            # Time image loading
-            load_start = time.time()
+            # Load images
+            if self.timing_enabled:
+                load_start = time.time()
+            
             for path in batch_paths:
                 img = cv2.imread(path)
                 if img is not None:
@@ -514,8 +624,10 @@ class RunnerDetector:
                     print(f"Could not read image: {path}")
                     if processed_files is not None:
                         processed_files.add(os.path.basename(path))
-            load_time = time.time() - load_start
-            print(f"⏱️ Image loading for {len(batch_paths)} files took {load_time:.2f} seconds")
+                        
+            if self.timing_enabled:
+                load_time = time.time() - load_start
+                print(f"⏱️ Image loading for {len(batch_paths)} files took {load_time:.2f} seconds")
 
             if not batch_images:
                 continue
@@ -523,10 +635,13 @@ class RunnerDetector:
             imgs = [img for _, img in batch_images]
 
             # Run YOLO detection with adjusted confidence
-            detection_start = time.time()
-            results = self.model(imgs, conf=CONFIDENCE_THRESHOLD)
-            detection_time = time.time() - detection_start
-            print(f"⏱️ YOLO detection for {len(imgs)} images took {detection_time:.2f} seconds")
+            if self.timing_enabled:
+                detection_start = time.time()
+                results = self.model(imgs, conf=CONFIDENCE_THRESHOLD)
+                detection_time = time.time() - detection_start
+                print(f"⏱️ YOLO detection for {len(imgs)} images took {detection_time:.2f} seconds")
+            else:
+                results = self.model(imgs, conf=CONFIDENCE_THRESHOLD)
 
             for (path, img), result in zip(batch_images, results):
                 base_name = os.path.splitext(os.path.basename(path))[0]
@@ -591,7 +706,10 @@ class RunnerDetector:
                         # Continue with next future instead of stopping
 
     def filter_overlapping_boxes(self, boxes, iou_threshold=0.3):
-        """Filter out overlapping bounding boxes keeping only the best ones"""
+        """
+        Filter out overlapping bounding boxes and edge detections
+        that are likely partial people
+        """
         if not boxes:
             return []
 
@@ -599,8 +717,52 @@ class RunnerDetector:
         boxes = sorted(boxes, key=lambda x: x[4], reverse=True)
 
         kept_boxes = []
+        img_width, img_height = 0, 0
+        
+        # If we have at least one box, use its coordinates to estimate image dimensions
+        if len(boxes) > 0:
+            # Estimate image dimensions based on detections
+            # This works because YOLO coordinates are in absolute pixels
+            img_width = max([box[2] for box in boxes]) * 1.1  # Add margin
+            img_height = max([box[3] for box in boxes]) * 1.1  # Add margin
 
         for box in boxes:
+            # Extract coordinates
+            x1, y1, x2, y2, conf = box
+            
+            # Skip boxes with very low confidence
+            if conf < 0.4:  # More strict minimum confidence
+                continue
+                
+            # Skip boxes that are very small
+            width = x2 - x1
+            height = y2 - y1
+            if width < 50 or height < 100:  # Minimum reasonable size for a person
+                continue
+                
+            # Skip boxes that are likely partial detections at image edges
+            edge_margin = 0.03  # 3% of image dimension
+            img_margin_x = img_width * edge_margin
+            img_margin_y = img_height * edge_margin
+            
+            is_at_edge = (
+                x1 < img_margin_x or 
+                x2 > (img_width - img_margin_x) or
+                y1 < img_margin_y or
+                y2 > (img_height - img_margin_y)
+            )
+            
+            # Only filter out edge detections that are small relative to the image
+            # (likely partial people)
+            if is_at_edge:
+                person_width_ratio = width / img_width
+                person_height_ratio = height / img_height
+                
+                # Skip if small and at edge (likely partial)
+                if person_width_ratio < 0.25 and person_height_ratio < 0.4:
+                    continue
+            
+            # Handle overlapping boxes
             should_keep = True
             for kept_box in kept_boxes:
                 if self.calculate_iou(box[:4], kept_box[:4]) > iou_threshold:
@@ -671,8 +833,6 @@ class NewImageHandler(FileSystemEventHandler):
 
 
 def main():
-    overall_start_time = time.time()
-    
     parser = argparse.ArgumentParser(description="Enhanced Runner Detector with Multi-Bib OCR")
     parser.add_argument("--input_dir", "-i", default="in", help="Directory with input images.")
     parser.add_argument("--output_dir", "-o", default="out", help="Directory for output images.")
@@ -683,7 +843,12 @@ def main():
                         help="Watch the input directory for new files continuously.")
     parser.add_argument("--race_format", "-f", default=None,
                         help="Optional: Specific race format to optimize detection (marathon, 5k, etc.)")
+    parser.add_argument("--timing", "-t", action="store_true",
+                        help="Enable timing logs for performance analysis.")
     args = parser.parse_args()
+    
+    # Only start timing if enabled
+    overall_start_time = time.time() if args.timing else None
 
     try:
         ratio_width, ratio_height = map(float, args.aspect_ratio.split(':'))
@@ -696,7 +861,7 @@ def main():
         print(f"Optimizing for race format: {args.race_format}")
 
     try:
-        detector = RunnerDetector(min_height=args.min_height, ratio_width=ratio_width, ratio_height=ratio_height)
+        detector = RunnerDetector(min_height=args.min_height, ratio_width=ratio_width, ratio_height=ratio_height, timing_enabled=args.timing)
         if args.watch:
             print("Watch mode enabled. Monitoring directory for new files...")
             processed_files = set()
@@ -723,15 +888,17 @@ def main():
             # Clean up thread pool
             detector.executor.shutdown()
             
-            # Print overall execution time
-            overall_time = time.time() - overall_start_time
-            print(f"\n⏱️ Total execution time: {overall_time:.2f} seconds")
-            print(f"⏱️ Execution completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            # Print overall execution time if timing is enabled
+            if args.timing:
+                overall_time = time.time() - overall_start_time
+                print(f"\n⏱️ Total execution time: {overall_time:.2f} seconds")
+                print(f"⏱️ Execution completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     except Exception as e:
         print(f"Error in main: {e}")
         # Print execution time even if there was an error
-        overall_time = time.time() - overall_start_time
-        print(f"\n⏱️ Execution time until error: {overall_time:.2f} seconds")
+        if args.timing and overall_start_time:
+            overall_time = time.time() - overall_start_time
+            print(f"\n⏱️ Execution time until error: {overall_time:.2f} seconds")
 
 
 if __name__ == "__main__":
