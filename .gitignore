@@ -6,3 +6,5 @@ out/*.jpg
 yolov8n.pt
 .DS_Store
 .idea
+temp_images
+temp_analysis
